@@ -28,7 +28,7 @@ Vagrant.configure("2") do |config|
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine and only allow access
   # via 127.0.0.1 to disable public access
-  # config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
+  config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
 
   # Create a private network, which allows host-only access to the machine
   # using a specific IP.
@@ -71,12 +71,16 @@ Vagrant.configure("2") do |config|
   # Ansible, Chef, Docker, Puppet and Salt are also available. Please see the
   # documentation for more information about their specific syntax and use.
   config.vm.provision "shell", inline: <<-SHELL
-     yum install wget httpd tar unzip zip -y
-     yum install php php-mysqlnd php-fpm php-xml php-gd php-mbstring php-json php-intl php-zip -y
+    # Update system and install required packages
+    dnf update -y
+    dnf install wget httpd tar unzip zip -y
+    dnf install php php-mysqlnd php-fpm php-xml php-gd php-mbstring php-json php-intl php-zip -y
 
-    # set up webserver
+    # Set up webserver
     systemctl start httpd
     systemctl enable httpd
+
+    # Mock finance website
     mkdir -p /tmp/finance
     cd /tmp/finance  
     wget https://www.tooplate.com/zip-templates/2135_mini_finance.zip
@@ -86,47 +90,90 @@ Vagrant.configure("2") do |config|
     cd /tmp/
     rm -rf /tmp/finance
 
-    # Set up DB
+    # Set up DB and ownership for WordPress
     mkdir -p /srv/www
-    chown -R apache: /srv/www
+    chown -R apache:apache /srv/www
     chmod 2775 /srv/www
-    wget https://wordpress.org/latest.tar.gz | -u apache:2905 tar -xvzf -C /srv/www
-    mkdir /etc/apache2/site-available/
-    cd /etc/apache2/site-available/
-    touch wordpress.conf
-    cat <<EOT >> wordpress.conf
+    
+    # Download and extract WordPress
+    cd /tmp
+    wget https://wordpress.org/latest.tar.gz
+    tar -xzf latest.tar.gz -C /srv/www
+    chown -R apache:apache /srv/www/wordpress
+
+    # Configure Apache for WordPress (CentOS/RHEL way)
+    cat > /etc/httpd/conf.d/wordpress.conf <<EOT
 <VirtualHost *:80>
     DocumentRoot /srv/www/wordpress
     <Directory /srv/www/wordpress>
         Options FollowSymLinks
+        AllowOverride All
         Require all granted
     </Directory>
+    ErrorLog /var/log/httpd/wordpress_error.log
+    CustomLog /var/log/httpd/wordpress_access.log combined
 </VirtualHost>
 EOT
-    a2ensite wordpress
-    a2enmod rewrite
-    a2dissite 000-default
-    systemctl restart apache2
 
+    # Install MySQL (correct repository for EL9)
     if ! command -v mysql >/dev/null; then
-      rpm -Uvh https://repo.mysql.com/mysql80-community-release-el7-11.noarch.rpm
-      yum install -y mysql-community-server
+      dnf install -y mysql-server
       systemctl enable mysqld
       systemctl start mysqld
     fi
 
-    # Set MySQL root password (only first time)
+    # Configure MySQL for WordPress
     ROOT_PW="2905"
-    if ! mysql -u root -p$ROOT_PW -e ";" 2>/dev/null; then
-      TEMP_PW=$(grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}')
-      mysql --connect-expired-password -u root -p"$TEMP_PW" \
-        -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$ROOT_PW'; FLUSH PRIVILEGES;"
+    
+    # Secure MySQL installation and set root password
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$ROOT_PW';" 2>/dev/null || true
+    mysql -u root -p$ROOT_PW -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+    mysql -u root -p$ROOT_PW -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" 2>/dev/null || true
+    mysql -u root -p$ROOT_PW -e "DROP DATABASE IF EXISTS test;" 2>/dev/null || true
+    mysql -u root -p$ROOT_PW -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" 2>/dev/null || true
+    mysql -u root -p$ROOT_PW -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+
+    # Run WordPress SQL script to create database and user
+    mysql -u root -p$ROOT_PW < /vagrant/wordpress.sql
+
+    # Configure WordPress
+    cp /srv/www/wordpress/wp-config-sample.php /srv/www/wordpress/wp-config.php
+    chown apache:apache /srv/www/wordpress/wp-config.php
+    
+    # Update database configuration
+    sed -i "s/database_name_here/wordpress/g" /srv/www/wordpress/wp-config.php
+    sed -i "s/username_here/wordpress/g" /srv/www/wordpress/wp-config.php
+    sed -i "s/password_here/2905/g" /srv/www/wordpress/wp-config.php
+    
+    # Replace WordPress salt keys with secure values
+    sed -i "/define( 'AUTH_KEY',/c\define('AUTH_KEY',         'wu;blg=u)sX~C~rkL;d,V|?P*dsE8BA.ln##n&y4u=W9,Mk=xVzasw00^T4znC.b');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'SECURE_AUTH_KEY',/c\define('SECURE_AUTH_KEY',  '7LbIrwJ%+,X9?uP|\`?@--SHIYT}u70>o0P-%{4|Vfyz-]>V0?u+:9miVV<JKUN4G');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'LOGGED_IN_KEY',/c\define('LOGGED_IN_KEY',    'NYT82{F;g>v,I4ec9u)9z+I|%.xoh@5r+U|:-Kzd.*HM-RNmouXL-xT1m\`Y:\$Lj?');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'NONCE_KEY',/c\define('NONCE_KEY',        'dUmZ!MS4-qPxmW-3X//-jkAB*_%#tW;8^g[^:du_8tBn2,J2/xg\$p&@MaL>pCPeW');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'AUTH_SALT',/c\define('AUTH_SALT',        '?7QVB:S+\`T{Ef}?]VGtU+o-%[^}R1Y,S/8V=s(+WIF%\$rQ?ZbBd5;7LG2I&m~:i*');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'SECURE_AUTH_SALT',/c\define('SECURE_AUTH_SALT', 'B<[KDdea.n9\$p1+{IJkI*3q_214ey=2:R:C1rV/SJz?ciO3eR< PTK,X2y71(<1i');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'LOGGED_IN_SALT',/c\define('LOGGED_IN_SALT',   '.f!xKlH8niTo(NVle4#.\`Joye-%mJ}?.{GSACORn|+Y1[ZO!Dj\$VW}A34[@Z:mW,');" /srv/www/wordpress/wp-config.php
+    sed -i "/define( 'NONCE_SALT',/c\define('NONCE_SALT',       ']{4xj=n^_Khym4%s W!g>#R,bVva*-irn0!AL|;OT6yDKbOqI_oiCvhTJf~kf)ig');" /srv/www/wordpress/wp-config.php
+
+    # Set proper SELinux contexts for WordPress
+    if command -v setsebool >/dev/null; then
+      setsebool -P httpd_can_network_connect 1
+      setsebool -P httpd_can_network_connect_db 1
+      restorecon -R /srv/www/wordpress
     fi
 
-    # Run WordPress SQL script
-    mysql -u root -p$ROOT_PW < /vagrant/wordpress.sql
-    # Install and configure WordPress
+    # Configure firewall
+    if systemctl is-active --quiet firewalld; then
+      firewall-cmd --permanent --add-service=http
+      firewall-cmd --permanent --add-service=https
+      firewall-cmd --reload
+    fi
 
-
+    # Restart services
+    systemctl restart httpd
+    systemctl restart mysqld
+    
+    echo "WordPress installation completed!"
+    echo "Access your WordPress site at: http://192.168.56.22"
   SHELL
 end
