@@ -1,0 +1,9 @@
+CREATE DATABASE wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE USER 'wordpress'@'localhost' IDENTIFIED BY '2905';
+
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER
+ON wordpress.*
+TO 'wordpress'@'localhost';
+
+FLUSH PRIVILEGES;
