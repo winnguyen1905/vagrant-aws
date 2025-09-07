@@ -1,0 +1,179 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Use the same CentOS Stream 9 box for all VMs
+  config.vm.box = "eurolinux-vagrant/centos-stream-9"
+
+  # -------------------- WEB (Nginx reverse proxy) --------------------
+  config.vm.define "web" do |web|
+    web.vm.hostname = "web.local"
+    web.vm.network "private_network", ip: "192.168.56.20"
+    # Expose ONLY the web VM to your host:
+    web.vm.network "forwarded_port",
+      guest: 80, host: 8080, host_ip: "127.0.0.1", auto_correct: true
+
+    web.vm.provider "virtualbox" do |vb|
+      vb.memory = "1024"
+    end
+
+    web.vm.provision "shell", inline: <<'SHELL'
+set -euxo pipefail
+
+dnf -y update
+dnf -y install nginx
+
+cat >/etc/nginx/conf.d/wordpress_proxy.conf <<'EOF'
+server {
+  listen 80;
+  server_name _;
+
+  location / {
+    proxy_pass http://192.168.56.21:80;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+EOF
+
+systemctl enable --now nginx
+
+# Firewalld is not needed for host-only private network, but guard just in case
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-service=http || true
+  firewall-cmd --reload || true
+fi
+
+echo "WEB ready: http://localhost:8080 -> 192.168.56.21"
+SHELL
+  end
+
+  # -------------------- WORDPRESS (Apache + PHP) --------------------
+  config.vm.define "wordpress" do |wp|
+    wp.vm.hostname = "wordpress.local"
+    wp.vm.network "private_network", ip: "192.168.56.21"
+
+    wp.vm.provider "virtualbox" do |vb|
+      vb.memory = "1536"
+    end
+
+    wp.vm.provision "shell", inline: <<'SHELL'
+set -euxo pipefail
+
+dnf -y update
+# Ensure PHP stream is available (EL9 default is fine; enable explicitly if needed)
+# dnf -y module reset php || true
+# dnf -y module enable php:8.0 || true
+
+dnf -y install httpd php php-mysqlnd php-xml php-gd php-mbstring php-json php-intl php-zip unzip wget tar
+
+systemctl enable --now httpd
+
+# Install WordPress
+mkdir -p /srv/www
+cd /tmp
+wget -q https://wordpress.org/latest.tar.gz
+tar -xzf latest.tar.gz -C /srv/www
+chown -R apache:apache /srv/www/wordpress
+
+# Apache vhost for WordPress
+cat >/etc/httpd/conf.d/wordpress.conf <<'EOF'
+<VirtualHost *:80>
+    ServerName wordpress.local
+    DocumentRoot /srv/www/wordpress
+    <Directory /srv/www/wordpress>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    ErrorLog /var/log/httpd/wordpress_error.log
+    CustomLog /var/log/httpd/wordpress_access.log combined
+</VirtualHost>
+EOF
+
+# Basic wp-config
+cp -n /srv/www/wordpress/wp-config-sample.php /srv/www/wordpress/wp-config.php
+sed -i "s/database_name_here/wordpress/" /srv/www/wordpress/wp-config.php
+sed -i "s/username_here/wordpress/"      /srv/www/wordpress/wp-config.php
+sed -i "s/password_here/2905/"           /srv/www/wordpress/wp-config.php
+# Point to DB VM
+sed -i "s/define( 'DB_HOST'.*/define( 'DB_HOST', '192.168.56.22' );/" /srv/www/wordpress/wp-config.php
+
+# Quick random salts
+perl -0777 -pe "s/put your unique phrase here/$(tr -dc A-Za-z0-9 </dev/urandom | head -c 40)/g" \
+  -i /srv/www/wordpress/wp-config.php
+chown apache:apache /srv/www/wordpress/wp-config.php
+
+# SELinux: allow Apache/PHP to reach the DB over the network
+if command -v setsebool >/dev/null 2>&1; then
+  setsebool -P httpd_can_network_connect 1 || true
+  setsebool -P httpd_can_network_connect_db 1 || true
+  restorecon -R /srv/www/wordpress || true
+fi
+
+# Optional firewall (not needed for host-only private net)
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-service=http || true
+  firewall-cmd --reload || true
+fi
+
+systemctl restart httpd
+
+# Sanity test page (you can remove later)
+echo "<?php phpinfo(); ?>" > /srv/www/wordpress/info.php
+chown apache:apache /srv/www/wordpress/info.php
+
+echo "WORDPRESS ready on 192.168.56.21 (proxied by web VM)."
+SHELL
+  end
+
+  # -------------------- DATABASE (MariaDB/MySQL) --------------------
+  config.vm.define "db" do |db|
+    db.vm.hostname = "db.local"
+    db.vm.network "private_network", ip: "192.168.56.22"
+
+    db.vm.provider "virtualbox" do |vb|
+      vb.memory = "1024"
+    end
+
+    db.vm.provision "shell", inline: <<'SHELL'
+set -euxo pipefail
+
+dnf -y update
+dnf -y install mariadb-server
+
+systemctl enable --now mariadb
+
+# Bind to the private IP only
+CONF="/etc/my.cnf.d/mariadb-server.cnf"
+if ! grep -q "bind-address" "$CONF"; then
+  printf "\n[mysqld]\nbind-address=192.168.56.22\n" >> "$CONF"
+  systemctl restart mariadb
+fi
+
+ROOT_PW="2905"
+# Set root password (idempotent-ish)
+mysql -uroot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PW}';" || true
+
+# Create DB and app user (allow private subnet hosts)
+mysql -uroot -p${ROOT_PW} -e "CREATE DATABASE IF NOT EXISTS wordpress DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -uroot -p${ROOT_PW} -e "CREATE USER IF NOT EXISTS 'wordpress'@'192.168.56.%' IDENTIFIED BY '2905';"
+mysql -uroot -p${ROOT_PW} -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'192.168.56.%'; FLUSH PRIVILEGES;"
+
+# Optional seed (drop a wordpress.sql next to your Vagrantfile)
+if [ -f /vagrant/wordpress.sql ]; then
+  mysql -uroot -p${ROOT_PW} wordpress < /vagrant/wordpress.sql || true
+fi
+
+# Optional firewall (not needed for host-only private net)
+if systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-service=mysql || true
+  firewall-cmd --reload || true
+fi
+
+echo "DB ready on 192.168.56.22 (MariaDB). User: wordpress / 2905"
+SHELL
+  end
+end

@@ -28,7 +28,7 @@ Vagrant.configure("2") do |config|
   # Create a forwarded port mapping which allows access to a specific port
   # within the machine from a port on the host machine and only allow access
   # via 127.0.0.1 to disable public access
-  config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
+  # config.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "127.0.0.1"
 
   # Create a private network, which allows host-only access to the machine
   # using a specific IP.
@@ -145,15 +145,24 @@ EOT
     sed -i "s/username_here/wordpress/g" /srv/www/wordpress/wp-config.php
     sed -i "s/password_here/2905/g" /srv/www/wordpress/wp-config.php
     
-    # Replace WordPress salt keys with secure values
-    sed -i "/define( 'AUTH_KEY',/c\define('AUTH_KEY',         'wu;blg=u)sX~C~rkL;d,V|?P*dsE8BA.ln##n&y4u=W9,Mk=xVzasw00^T4znC.b');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'SECURE_AUTH_KEY',/c\define('SECURE_AUTH_KEY',  '7LbIrwJ%+,X9?uP|\`?@--SHIYT}u70>o0P-%{4|Vfyz-]>V0?u+:9miVV<JKUN4G');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'LOGGED_IN_KEY',/c\define('LOGGED_IN_KEY',    'NYT82{F;g>v,I4ec9u)9z+I|%.xoh@5r+U|:-Kzd.*HM-RNmouXL-xT1m\`Y:\$Lj?');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'NONCE_KEY',/c\define('NONCE_KEY',        'dUmZ!MS4-qPxmW-3X//-jkAB*_%#tW;8^g[^:du_8tBn2,J2/xg\$p&@MaL>pCPeW');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'AUTH_SALT',/c\define('AUTH_SALT',        '?7QVB:S+\`T{Ef}?]VGtU+o-%[^}R1Y,S/8V=s(+WIF%\$rQ?ZbBd5;7LG2I&m~:i*');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'SECURE_AUTH_SALT',/c\define('SECURE_AUTH_SALT', 'B<[KDdea.n9\$p1+{IJkI*3q_214ey=2:R:C1rV/SJz?ciO3eR< PTK,X2y71(<1i');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'LOGGED_IN_SALT',/c\define('LOGGED_IN_SALT',   '.f!xKlH8niTo(NVle4#.\`Joye-%mJ}?.{GSACORn|+Y1[ZO!Dj\$VW}A34[@Z:mW,');" /srv/www/wordpress/wp-config.php
-    sed -i "/define( 'NONCE_SALT',/c\define('NONCE_SALT',       ']{4xj=n^_Khym4%s W!g>#R,bVva*-irn0!AL|;OT6yDKbOqI_oiCvhTJf~kf)ig');" /srv/www/wordpress/wp-config.php
+    # Replace WordPress salt keys with secure values using a safer method
+    # Create a temporary file with the salt replacements
+    cat > /tmp/wp-salts.sed << 'EOF'
+s/define( 'AUTH_KEY',         'put your unique phrase here' );/define('AUTH_KEY', 'wu-blg-u-sX-C-rkL-d-V-P-dsE8BA-ln-n-y4u-W9-Mk-xVzasw00-T4znC-b');/
+s/define( 'SECURE_AUTH_KEY',  'put your unique phrase here' );/define('SECURE_AUTH_KEY', '7LbIrwJ-X9-uP-SHIYT-u70-o0P-4-Vfyz-V0-u-9miVV-JKUN4G');/
+s/define( 'LOGGED_IN_KEY',    'put your unique phrase here' );/define('LOGGED_IN_KEY', 'NYT82-F-g-v-I4ec9u-9z-I-xoh-5r-U-Kzd-HM-RNmouXL-xT1m-Y-Lj');/
+s/define( 'NONCE_KEY',        'put your unique phrase here' );/define('NONCE_KEY', 'dUmZ-MS4-qPxmW-3X-jkAB-tW-8-g-du-8tBn2-J2-xg-p-MaL-pCPeW');/
+s/define( 'AUTH_SALT',        'put your unique phrase here' );/define('AUTH_SALT', '7QVB-S-T-Ef-VGtU-o-R1Y-S-8V-s-WIF-rQ-ZbBd5-7LG2I-m-i');/
+s/define( 'SECURE_AUTH_SALT', 'put your unique phrase here' );/define('SECURE_AUTH_SALT', 'B-KDdea-n9-p1-IJkI-3q-214ey-2-R-C1rV-SJz-ciO3eR-PTK-X2y71-1i');/
+s/define( 'LOGGED_IN_SALT',   'put your unique phrase here' );/define('LOGGED_IN_SALT', 'f-xKlH8niTo-NVle4-Joye-mJ-GSACORn-Y1-ZO-Dj-VW-A34-Z-mW');/
+s/define( 'NONCE_SALT',       'put your unique phrase here' );/define('NONCE_SALT', '4xj-n-Khym4-s-W-g-R-bVva-irn0-AL-OT6yDKbOqI-oiCvhTJf-kf-ig');/
+EOF
+    
+    # Apply the salt replacements
+    sed -f /tmp/wp-salts.sed /srv/www/wordpress/wp-config.php > /tmp/wp-config-new.php
+    mv /tmp/wp-config-new.php /srv/www/wordpress/wp-config.php
+    chown apache:apache /srv/www/wordpress/wp-config.php
+    rm -f /tmp/wp-salts.sed
 
     # Set proper SELinux contexts for WordPress
     if command -v setsebool >/dev/null; then
